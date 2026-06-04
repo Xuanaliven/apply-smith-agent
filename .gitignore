@@ -1,0 +1,16 @@
+.env
+data/master_profile/experience_atoms.md
+data/master_profile/profile_questions.md
+data/master_profile/skills.md
+data/master_profile/forbidden_claims.md
+applications/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+.DS_Store
+pipelines/*.md
+strategy/*.md
+!pipelines/.gitkeep
+!strategy/.gitkeep
