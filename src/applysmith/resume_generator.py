@@ -6,9 +6,14 @@ Architectural safeguards against metric fabrication (applied in order):
      model knows exactly which numbers it is allowed to use.
   2. After LLM returns — Pass 1 (_validate_bullets): strip any number not present in the
      whitelist for that experience; override claim_level to Red.
-  3. After LLM returns — Pass 2 (_validate_metric_sources): require every number in a
-     bullet to be traceable to a verbatim metric_source phrase from experience_atoms.
-     Mismatches are stripped and flagged Red.
+  3. After LLM returns — Pass 2 (_validate_metric_sources): structural validation:
+       Step 1  Numbers in bullet_text must appear in metric_source (set comparison).
+       Step 2  Numbers in metric_source must appear in atoms_raw.
+               Catches 91% invented from 2.91%, or "2%" vs real "1.2%".
+       Step 3  Context anchor: for each number in metric_source the surrounding
+               keywords (3-4 char CJK n-grams; 3+ char English words) must overlap
+               with the context around that same number in atoms_raw.  Allows
+               legitimate paraphrasing while blocking context-swapped metrics.
 """
 import logging
 import re
@@ -90,8 +95,57 @@ def _validate_bullets(
 
 _NUM_PATTERN = re.compile(r"\d+\.?\d*")
 
-# Unit suffixes stripped when matching fabricated numbers in bullet text
+# Unit suffixes stripped when replacing fabricated numbers in bullet text
 _UNIT_SUFFIX = r"(?:[%+天月年周小时分秒条个万亿k]+\+?|\+)?"
+
+# CJK Unicode block
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]+")
+
+# English/general stopwords to exclude from keyword matching
+_STOPWORDS_EN = frozenset({"the", "and", "to", "of", "in", "for", "with", "by", "a", "an"})
+
+
+def _extract_keywords(text: str) -> frozenset:
+    """
+    Extract semantic keywords for context comparison.
+
+    - Chinese: all 3-4 character CJK n-grams from contiguous CJK runs.
+    - English: words of 3+ ASCII letters, lowercased, stopwords removed.
+
+    3-char minimum for CJK avoids noise from generic 2-char pairs like 小时/分钟
+    that appear near any time-based metric.
+    """
+    kws: set[str] = set()
+    for chunk in _CJK_RE.findall(text):
+        for n in (3, 4):
+            for i in range(len(chunk) - n + 1):
+                kws.add(chunk[i : i + n])
+    for word in re.findall(r"[a-zA-Z]{3,}", text):
+        w = word.lower()
+        if w not in _STOPWORDS_EN:
+            kws.add(w)
+    return frozenset(kws)
+
+
+def _context_keywords(num: str, text: str, window: int = 20) -> frozenset:
+    """Keywords from the context window surrounding the first occurrence of `num` in `text`."""
+    m = re.search(r"(?<![.\d])" + re.escape(num) + r"(?![.\d])", text)
+    if not m:
+        return frozenset()
+    ctx = text[max(0, m.start() - window) : m.start()] + text[m.end() : m.end() + window]
+    return _extract_keywords(ctx)
+
+
+def _atoms_context_keywords(num: str, atoms_raw: str, window: int = 30) -> frozenset:
+    """Union of keywords from ALL occurrences of `num` in atoms_raw."""
+    kws: set[str] = set()
+    for m in re.finditer(r"(?<![.\d])" + re.escape(num) + r"(?![.\d])", atoms_raw):
+        ctx = (
+            atoms_raw[max(0, m.start() - window) : m.start()]
+            + atoms_raw[m.end() : m.end() + window]
+        )
+        kws.update(_extract_keywords(ctx))
+    return frozenset(kws)
 
 
 def _validate_metric_sources(
@@ -99,36 +153,36 @@ def _validate_metric_sources(
     atoms_raw: Optional[str] = None,
 ) -> List[ResumeBullet]:
     """
-    Pass 2 validator: ensure every number in bullet_text has a verbatim metric_source.
+    Pass 2 validator — structural validation (three steps):
 
-    Rules:
-      - If bullet has numbers but metric_source is empty → Red, strip numbers.
-      - If metric_source provided but a number in bullet_text is absent from
-        metric_source → Red, strip that number.
-      - If atoms_raw provided and metric_source is not a substring of atoms_raw
-        (whitespace-normalised, case-insensitive) → Red, strip all numbers.
+    Step 1  Numbers in bullet_text must appear (exact set) in metric_source.
+            "2" does not pass when source only has "1.2".
+
+    Step 2  (requires atoms_raw) Numbers in metric_source must appear in atoms_raw.
+            Catches "91%" invented from "2.91%".
+
+    Step 3  (requires atoms_raw) Context anchor: keywords around each number in
+            metric_source must overlap with keywords around that same number in atoms.
+            Allows paraphrasing ("退货率比发布当月降低" ≈ "退货率降低") while blocking
+            context swaps ("报告生成时间" ≠ "核算耗时").
+
+    Paraphrasing is explicitly OK as long as Steps 1-3 pass.
     """
-    _atoms_normalised = (
-        re.sub(r"\s+", " ", atoms_raw).lower() if atoms_raw else None
-    )
+    atoms_nums = set(_NUM_PATTERN.findall(atoms_raw)) if atoms_raw else None
 
-    def _strip_all_nums(text: str) -> str:
+    def _strip_all(text: str) -> str:
         return re.sub(r"\d+\.?\d*" + _UNIT_SUFFIX, "[X]", text)
 
     def _strip_num(text: str, num: str) -> str:
-        return re.sub(
-            rf"(?<!\d){re.escape(num)}{_UNIT_SUFFIX}(?!\d)",
-            "[X]",
-            text,
-        )
+        return re.sub(rf"(?<!\d){re.escape(num)}{_UNIT_SUFFIX}(?!\d)", "[X]", text)
 
-    def _flag(b: ResumeBullet, cleaned_text: str, risk_prefix: str) -> ResumeBullet:
+    def _flag(b: ResumeBullet, cleaned: str, prefix: str) -> ResumeBullet:
         return ResumeBullet(
             experience_name=b.experience_name,
-            bullet_text=cleaned_text,
+            bullet_text=cleaned,
             claim_level="Red",
             evidence=b.evidence,
-            interview_risk=risk_prefix + b.interview_risk,
+            interview_risk=prefix + b.interview_risk,
             recommended_action="Verify metric source or remove number from bullet",
             metric_source=b.metric_source,
         )
@@ -141,54 +195,53 @@ def _validate_metric_sources(
             validated.append(b)
             continue
 
-        # Rule 1: numbers present but no metric_source
+        # ── Pre-check: metric_source must be present when numbers exist ─────────
         if not b.metric_source:
-            logger.debug(
-                "metric_source missing for bullet with numbers — flagging Red: %r",
-                b.bullet_text[:80],
-            )
-            validated.append(_flag(
-                b,
-                _strip_all_nums(b.bullet_text),
-                "[METRIC SOURCE MISSING — no verbatim attribution provided] ",
-            ))
+            logger.debug("metric_source missing for bullet — flagging Red: %r", b.bullet_text[:80])
+            validated.append(_flag(b, _strip_all(b.bullet_text),
+                                   "[METRIC SOURCE MISSING — no attribution provided] "))
             continue
 
-        # Rule 2b: metric_source not found verbatim in atoms_raw
-        if _atoms_normalised is not None:
-            normalised_src = re.sub(r"\s+", " ", b.metric_source).strip().lower()
-            if normalised_src and normalised_src not in _atoms_normalised:
-                logger.debug(
-                    "metric_source not found verbatim in atoms — flagging Red: %r",
-                    b.metric_source[:80],
-                )
-                validated.append(_flag(
-                    b,
-                    _strip_all_nums(b.bullet_text),
-                    "[METRIC SOURCE NOT FOUND IN ATOMS — not verbatim] ",
-                ))
+        # ── Step 1: numbers in bullet must appear in metric_source ───────────────
+        source_nums = set(_NUM_PATTERN.findall(b.metric_source))
+        bad = [n for n in nums if n not in source_nums]
+        if bad:
+            logger.debug("Step 1 fail — %s absent from metric_source: %r", bad, b.bullet_text[:80])
+            cleaned = b.bullet_text
+            for n in bad:
+                cleaned = _strip_num(cleaned, n)
+            validated.append(_flag(cleaned=cleaned, b=b,
+                                   prefix=f"[METRIC MISMATCH — {', '.join(bad)} not in metric_source] "))
+            continue
+
+        if atoms_raw is not None:
+            # ── Step 2: numbers in metric_source must appear in atoms ────────────
+            bad_src = [n for n in source_nums if n not in atoms_nums]
+            if bad_src:
+                logger.debug("Step 2 fail — %s not in atoms: %r", bad_src, b.metric_source[:80])
+                validated.append(_flag(b, _strip_all(b.bullet_text),
+                                       f"[METRIC NUMBER NOT IN ATOMS — "
+                                       f"{', '.join(bad_src)} absent from experience_atoms] "))
                 continue
 
-        # Rule 2a: each number in bullet_text must appear in metric_source
-        # Compare against numbers extracted from metric_source (not substring),
-        # so "2" does not falsely match inside "1.2%".
-        source_nums = set(_NUM_PATTERN.findall(b.metric_source))
-        bad_nums = [n for n in nums if n not in source_nums]
-        if bad_nums:
-            logger.debug(
-                "Numbers %s in bullet not in metric_source — flagging Red: %r",
-                bad_nums,
-                b.bullet_text[:80],
-            )
-            cleaned = b.bullet_text
-            for num in bad_nums:
-                cleaned = _strip_num(cleaned, num)
-            validated.append(_flag(
-                b,
-                cleaned,
-                f"[METRIC MISMATCH — {', '.join(bad_nums)} in bullet absent from metric_source] ",
-            ))
-            continue
+            # ── Step 3: context anchor ───────────────────────────────────────────
+            failed_num = None
+            for num in source_nums:
+                src_kws = _context_keywords(num, b.metric_source)
+                if not src_kws:
+                    continue  # no surrounding context to verify
+                atm_kws = _atoms_context_keywords(num, atoms_raw)
+                if not (src_kws & atm_kws):
+                    failed_num = num
+                    break
+
+            if failed_num is not None:
+                logger.debug("Step 3 fail — context mismatch for %s: %r",
+                             failed_num, b.metric_source[:80])
+                validated.append(_flag(b, _strip_all(b.bullet_text),
+                                       f"[CONTEXT MISMATCH — metric_source context for "
+                                       f"{failed_num} shares no keywords with atoms] "))
+                continue
 
         validated.append(b)
 
