@@ -1,14 +1,12 @@
 """
 Claim Checker — independent second-pass audit of resume bullet risk levels.
 """
-import re
 from typing import Optional
 
 from .llm_client import call_llm_json
+from .metric_validator import _NUM_PATTERN, validate_metric_sources
 from .models import ClaimCheckReport, ResumeBullet, TailoredResume
 from .prompts.claim_check import CLAIM_CHECK_SYSTEM
-
-_NUM_PATTERN = re.compile(r"\d+\.?\d*")
 
 
 def check_claims(
@@ -22,7 +20,8 @@ def check_claims(
         resume: The tailored resume to audit.
         language: Output language ("en" or "zh").
         atoms_raw: Optional raw text of experience_atoms.md used to verify that
-                   metric_source strings are genuine verbatim excerpts.
+                   metric_source attributions pass the same 3-step structural
+                   validator used by the resume generator.
     """
     if language == "zh":
         system = (
@@ -37,66 +36,25 @@ def check_claims(
 
     # Build lookup: bullet_text → metric_source from the original resume.
     # The LLM's claim-check response doesn't re-state metric_source, so we
-    # restore it from the generator output and use it for post-validation.
+    # restore it from the generator output before running structural validation.
     source_lookup = {b.bullet_text: b.metric_source for b in resume.bullets}
 
-    atoms_normalised = (
-        re.sub(r"\s+", " ", atoms_raw).lower() if atoms_raw else None
-    )
-
-    fixed: list[ResumeBullet] = []
+    # Restore metric_source into each checker bullet
+    restored: list[ResumeBullet] = []
     for b in report.bullets:
-        nums = _NUM_PATTERN.findall(b.bullet_text)
-        if not nums:
-            fixed.append(b)
-            continue
-
-        metric_source = source_lookup.get(b.bullet_text, b.metric_source)
-
-        # Rule 1: numbers present but no metric_source → auto-flag Red
-        if not metric_source:
-            fixed.append(ResumeBullet(
-                experience_name=b.experience_name,
-                bullet_text=b.bullet_text,
-                claim_level="Red",
-                evidence=b.evidence,
-                interview_risk=(
-                    "[AUTO-FLAGGED: numbers present but no metric_source attribution] "
-                    + b.interview_risk
-                ),
-                recommended_action="Add verbatim metric_source or remove number from bullet",
-                metric_source="",
-            ))
-            continue
-
-        # Rule 2: metric_source not found verbatim in atoms_raw → auto-flag Red
-        if atoms_normalised is not None:
-            src_norm = re.sub(r"\s+", " ", metric_source).strip().lower()
-            if src_norm and src_norm not in atoms_normalised:
-                fixed.append(ResumeBullet(
-                    experience_name=b.experience_name,
-                    bullet_text=b.bullet_text,
-                    claim_level="Red",
-                    evidence=b.evidence,
-                    interview_risk=(
-                        "[AUTO-FLAGGED: metric_source not found verbatim in atoms] "
-                        + b.interview_risk
-                    ),
-                    recommended_action="Verify metric_source against experience_atoms",
-                    metric_source=metric_source,
-                ))
-                continue
-
-        # Propagate metric_source into the report bullet
-        fixed.append(ResumeBullet(
+        ms = source_lookup.get(b.bullet_text, b.metric_source)
+        restored.append(ResumeBullet(
             experience_name=b.experience_name,
             bullet_text=b.bullet_text,
             claim_level=b.claim_level,
             evidence=b.evidence,
             interview_risk=b.interview_risk,
             recommended_action=b.recommended_action,
-            metric_source=metric_source,
+            metric_source=ms,
         ))
+
+    # Apply same 3-step structural validator as resume_generator
+    fixed = validate_metric_sources(restored, atoms_raw)
 
     return ClaimCheckReport(
         overall_risk=report.overall_risk,

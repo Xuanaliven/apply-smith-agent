@@ -17,27 +17,39 @@ If an experience has no allowed metrics (listed as "none"), write the bullet WIT
 numbers or percentages. Do not invent numbers. Using a made-up number is worse than
 having no number.
 
-CRITICAL METRIC RULES — Verbatim source attribution:
-1. For EVERY number or percentage in a bullet, you MUST provide a metric_source field
-   containing the EXACT verbatim phrase from experience_atoms.md that supports that metric.
-2. The metric_source must include the surrounding context (the original description with the number).
-3. If you cannot find a verbatim phrase to support a metric, do NOT use that metric in the bullet.
-4. Examples:
-   GOOD:
+CRITICAL METRIC RULES — Source attribution:
+1. For EVERY number or percentage in a bullet, provide a metric_source field containing
+   the original phrase from experience_atoms.md that supports that metric.
+2. metric_source CAN be a paraphrase — exact wording is not required.
+   BUT the numbers must be identical and the surrounding context (what the metric measures)
+   must refer to the same thing.
+3. All numbers in metric_source MUST come from experience_atoms verbatim.
+   Do NOT invent new numbers or reinterpret existing ones.
+4. Write metric_source in the same language as the experience_atoms text.
+5. When ORIGINAL ATOMS are provided in the user prompt, metric_source must be
+   copied or lightly paraphrased from the ORIGINAL ATOMS text — the surrounding
+   context words AND numbers must come from the atoms, not invented by you.
+   You may freely paraphrase bullet_text, but metric_source must stay close to
+   the atoms wording. Never invent a metric context not present in atoms.
+6. Examples:
+   GOOD (paraphrase OK — same metric, shared keywords 退货率):
      bullet_text: Optimized listings, reducing return rate by 1.2%
-     metric_source: 退货率比发布当月降低 1.2%
+     metric_source: 退货率比发布当月降低1.2%
+     atoms says:   退货率降低1.2%
+     ✓ number 1.2 matches; context 退货率 appears in both
 
-   BAD (number reinterpreted):
+   BAD (number reinterpreted — 91 does not exist in atoms, only 2.91):
      bullet_text: Achieved 91% coupon usage rate
-     metric_source: 核销率仅2.91%
-     (WRONG: source says 2.91% redemption rate, bullet claims 91% usage — completely different)
+     metric_source: 核销率提升至91%
+     atoms says:   核销率仅2.91%
+     ✗ 91 is not a real number from atoms
 
-   BAD (number context swapped):
-     bullet_text: Reduced error rate by 30%
-     metric_source: 退货率比发布当月降低 1.2%
-     (WRONG: numbers do not match between bullet and source)
+   BAD (context swap — numbers exist in atoms but describe a different metric):
+     bullet_text: Reduced report time from 1 hour to 10 minutes
+     metric_source: 报告生成时间从1小时缩短到10分钟
+     atoms says:   核算耗时从每日约1小时压缩至10分钟
+     ✗ metric_source says 报告生成时间 but atoms talk about 核算耗时 — different context
 
-5. metric_source must be a verbatim substring of the actual experience_atoms text, not a paraphrase.
 6. If a bullet has no metric, set metric_source to empty string.
 
 For each selected experience, generate one resume bullet.

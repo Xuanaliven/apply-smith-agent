@@ -382,7 +382,21 @@ def test_whitelist_enforced():
 _ATOMS_SAMPLE = """\
 ## EXP-001
 - experience_name: 产品运营实习
-- metric: 退货率比发布当月降低 1.2%
+- metric: 退货率降低1.2%
+"""
+
+# Separate atoms sample for coupon / context-swap tests
+_ATOMS_COUPON = """\
+## EXP-004
+- experience_name: O2O补贴策略
+- metric: 核销率仅2.91%
+"""
+
+# Atoms sample for report-time context-swap test
+_ATOMS_REPORT = """\
+## EXP-003
+- experience_name: 财务BP专员
+- metric: 核算耗时从每日约1小时压缩至10分钟
 """
 
 _SELECTION_SOURCE = ExperienceSelectionResult(
@@ -440,34 +454,47 @@ def test_metric_source_required_when_numbers_present():
 
 
 # ---------------------------------------------------------------------------
-# 9. test_metric_source_verbatim_check
+# 9. test_metric_source_numbers_in_atoms
 # ---------------------------------------------------------------------------
 
-def test_metric_source_verbatim_check():
-    """metric_source not found verbatim in atoms → Red."""
+def test_metric_source_numbers_in_atoms():
+    """Step 2: number in metric_source (91) not found in atoms (only 2.91) → Red."""
+    _sel = ExperienceSelectionResult(
+        included=[ExperienceMatch(
+            experience_id="EXP-004", experience_name="O2O补贴策略",
+            match_level="Strong", why_matched="Coupon ops", suggested_angle="", risk_notes="",
+        )],
+        excluded=[], packaging_notes="Lead with data.", capability_gaps=[],
+    )
+    _ideal = IdealCandidate(
+        role_type="Ops", background_summary="Ops background.",
+        must_have_experiences=[], nice_to_have_experiences=[],
+        must_have_skills=[], differentiators=[], red_line_filters=[],
+    )
     mock = {
         "target_role": "Ops",
         "target_company": "TestCo",
         "summary_statement": "Experienced candidate.",
         "bullets": [{
-            "experience_name": "产品运营实习",
-            "bullet_text": "Reduced return rate by 1.2%.",
+            "experience_name": "O2O补贴策略",
+            "bullet_text": "Designed coupon strategy achieving 91% redemption rate.",
             "claim_level": "Green",
-            "evidence": "Project data",
+            "evidence": "Project report",
             "interview_risk": "",
             "recommended_action": "",
-            "metric_source": "退货率下降了1.2%（这段文字在atoms里不存在）",  # NOT in atoms
+            # 91 does NOT exist in atoms — atoms only has 2.91
+            "metric_source": "核销率提升至91%",
         }],
         "packaging_notes": "Lead with results.",
     }
     with patch("applysmith.llm_client.call_llm", return_value=json.dumps(mock)):
         result = generate_resume(
-            _SELECTION_SOURCE, _IDEAL_SOURCE, "Ops", "TestCo",
-            metric_whitelist={"EXP-001": ["1.2%"]},
-            atoms_raw=_ATOMS_SAMPLE,
+            _sel, _ideal, "Ops", "TestCo",
+            metric_whitelist={"EXP-004": ["2.91%"]},
+            atoms_raw=_ATOMS_COUPON,
         )
     assert result.bullets[0].claim_level == "Red"
-    assert "NOT FOUND IN ATOMS" in result.bullets[0].interview_risk
+    assert "NOT IN ATOMS" in result.bullets[0].interview_risk
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +564,9 @@ def test_no_numbers_no_source_required():
 # ---------------------------------------------------------------------------
 
 def test_correct_attribution_passes():
-    """bullet '1.2%', metric_source '退货率比发布当月降低 1.2%' verbatim in atoms → Green."""
+    """Paraphrased metric_source that shares keywords with atoms → Green.
+    metric_source says '退货率减少了1.2%' (paraphrase); atoms says '退货率降低1.2%'.
+    Shared keyword '退货率' (3-char CJK n-gram) satisfies Step 3."""
     mock = {
         "target_role": "Ops",
         "target_company": "TestCo",
@@ -546,10 +575,11 @@ def test_correct_attribution_passes():
             "experience_name": "产品运营实习",
             "bullet_text": "Optimized listings, reducing return rate by 1.2%.",
             "claim_level": "Green",
-            "evidence": "退货率比发布当月降低 1.2%",
+            "evidence": "Project data",
             "interview_risk": "",
             "recommended_action": "",
-            "metric_source": "退货率比发布当月降低 1.2%",  # verbatim in _ATOMS_SAMPLE
+            # paraphrase: "减少了" instead of "降低", but shares "退货率" near 1.2
+            "metric_source": "退货率减少了1.2%",
         }],
         "packaging_notes": "Lead with results.",
     }
@@ -560,4 +590,91 @@ def test_correct_attribution_passes():
             atoms_raw=_ATOMS_SAMPLE,
         )
     assert result.bullets[0].claim_level == "Green"
-    assert result.bullets[0].metric_source == "退货率比发布当月降低 1.2%"
+    assert result.bullets[0].metric_source == "退货率减少了1.2%"
+
+
+# ---------------------------------------------------------------------------
+# 13. test_context_keyword_required
+# ---------------------------------------------------------------------------
+
+_SELECTION_REPORT = ExperienceSelectionResult(
+    included=[ExperienceMatch(
+        experience_id="EXP-003", experience_name="财务BP专员",
+        match_level="Strong", why_matched="Platform launch", suggested_angle="", risk_notes="",
+    )],
+    excluded=[], packaging_notes="", capability_gaps=[],
+)
+
+
+def test_context_keyword_required():
+    """Step 3: numbers (1, 10) exist in atoms but context keywords don't match → Red.
+
+    metric_source context: '报告生成时间' (3-4 char n-grams: 报告生, 告生成, 生成时, 成时间, 时间从, ...)
+    atoms context near 1:  '核算耗时' (核算耗, 算耗时, 耗时从, ...)
+    No shared n-grams → context mismatch → Red.
+    """
+    mock = {
+        "target_role": "Ops",
+        "target_company": "TestCo",
+        "summary_statement": "Experienced candidate.",
+        "bullets": [{
+            "experience_name": "财务BP专员",
+            "bullet_text": "Led platform launch reducing report preparation from 1 hour to 10 minutes.",
+            "claim_level": "Green",
+            "evidence": "Platform records",
+            "interview_risk": "",
+            "recommended_action": "",
+            # numbers 1 and 10 exist in atoms, but surrounding context differs
+            "metric_source": "报告生成时间从1小时缩短到10分钟",
+        }],
+        "packaging_notes": "",
+    }
+    with patch("applysmith.llm_client.call_llm", return_value=json.dumps(mock)):
+        result = generate_resume(
+            _SELECTION_REPORT, _IDEAL_SOURCE, "Ops", "TestCo",
+            metric_whitelist={"EXP-003": ["1小时", "10分"]},
+            atoms_raw=_ATOMS_REPORT,
+        )
+    assert result.bullets[0].claim_level == "Red"
+    assert "CONTEXT MISMATCH" in result.bullets[0].interview_risk
+
+
+# ---------------------------------------------------------------------------
+# 14. test_paraphrase_with_shared_keywords_passes
+# ---------------------------------------------------------------------------
+
+_ATOMS_RETURN_SHORT = """\
+## EXP-001
+- experience_name: 产品运营实习
+- metric: 退货率降低1.2%
+"""
+
+
+def test_paraphrase_with_shared_keywords_passes():
+    """Paraphrased metric_source '退货率比发布当月降低1.2%' vs atoms '退货率降低1.2%'.
+
+    Shared 3-char keyword '退货率' appears in both contexts near 1.2 → Step 3 passes.
+    """
+    mock = {
+        "target_role": "Ops",
+        "target_company": "TestCo",
+        "summary_statement": "Experienced candidate.",
+        "bullets": [{
+            "experience_name": "产品运营实习",
+            "bullet_text": "Reduced return rate by 1.2% through listing optimization.",
+            "claim_level": "Green",
+            "evidence": "Ops records",
+            "interview_risk": "",
+            "recommended_action": "",
+            # longer paraphrase — not verbatim, but shares 退货率 near 1.2
+            "metric_source": "退货率比发布当月降低1.2%",
+        }],
+        "packaging_notes": "",
+    }
+    with patch("applysmith.llm_client.call_llm", return_value=json.dumps(mock)):
+        result = generate_resume(
+            _SELECTION_SOURCE, _IDEAL_SOURCE, "Ops", "TestCo",
+            metric_whitelist={"EXP-001": ["1.2%"]},
+            atoms_raw=_ATOMS_RETURN_SHORT,
+        )
+    assert result.bullets[0].claim_level == "Green"
