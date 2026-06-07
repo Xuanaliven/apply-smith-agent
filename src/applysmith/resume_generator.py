@@ -2,11 +2,12 @@
 Resume Generator — writes tailored resume bullets from selected experiences.
 
 Architectural safeguards against metric fabrication (applied in order):
-  1. Before calling LLM: inject per-experience metric whitelist into the prompt so the
-     model knows exactly which numbers it is allowed to use.
+  1. Before calling LLM: inject per-experience metric whitelist AND raw atoms
+     text into the prompt so the model knows exactly which numbers and contexts
+     it is allowed to use.
   2. After LLM returns — Pass 1 (_validate_bullets): strip any number not present in the
      whitelist for that experience; override claim_level to Red.
-  3. After LLM returns — Pass 2 (_validate_metric_sources): structural validation:
+  3. After LLM returns — Pass 2 (validate_metric_sources): structural validation:
        Step 1  Numbers in bullet_text must appear in metric_source (set comparison).
        Step 2  Numbers in metric_source must appear in atoms_raw.
                Catches 91% invented from 2.91%, or "2%" vs real "1.2%".
@@ -21,6 +22,7 @@ from typing import Dict, List, Optional, Set
 
 from .llm_client import call_llm_json
 from .metric_extractor import allowed_digits
+from .metric_validator import _NUM_PATTERN, _UNIT_SUFFIX, validate_metric_sources
 from .models import ExperienceSelectionResult, IdealCandidate, ResumeBullet, TailoredResume
 from .prompts.resume_gen import RESUME_GEN_SYSTEM
 
@@ -40,6 +42,18 @@ def _build_whitelist_block(
         else:
             lines.append(f"- {exp.experience_id} ({exp.experience_name}): none — write bullet without numbers")
     return "\n".join(lines)
+
+
+def _extract_atoms_for_experiences(atoms_raw: str, experience_ids: List[str]) -> str:
+    """Extract only the EXP-XXX sections matching experience_ids from atoms_raw."""
+    sections = re.split(r"(?=^## EXP-)", atoms_raw, flags=re.MULTILINE)
+    matched = []
+    for section in sections:
+        for exp_id in experience_ids:
+            if section.startswith(f"## {exp_id}"):
+                matched.append(section.strip())
+                break
+    return "\n\n".join(matched)
 
 
 def _validate_bullets(
@@ -93,161 +107,6 @@ def _validate_bullets(
     return validated
 
 
-_NUM_PATTERN = re.compile(r"\d+\.?\d*")
-
-# Unit suffixes stripped when replacing fabricated numbers in bullet text
-_UNIT_SUFFIX = r"(?:[%+天月年周小时分秒条个万亿k]+\+?|\+)?"
-
-# CJK Unicode block
-_CJK_RE = re.compile(r"[\u4e00-\u9fff]+")
-
-# English/general stopwords to exclude from keyword matching
-_STOPWORDS_EN = frozenset({"the", "and", "to", "of", "in", "for", "with", "by", "a", "an"})
-
-
-def _extract_keywords(text: str) -> frozenset:
-    """
-    Extract semantic keywords for context comparison.
-
-    - Chinese: all 3-4 character CJK n-grams from contiguous CJK runs.
-    - English: words of 3+ ASCII letters, lowercased, stopwords removed.
-
-    3-char minimum for CJK avoids noise from generic 2-char pairs like 小时/分钟
-    that appear near any time-based metric.
-    """
-    kws: set[str] = set()
-    for chunk in _CJK_RE.findall(text):
-        for n in (3, 4):
-            for i in range(len(chunk) - n + 1):
-                kws.add(chunk[i : i + n])
-    for word in re.findall(r"[a-zA-Z]{3,}", text):
-        w = word.lower()
-        if w not in _STOPWORDS_EN:
-            kws.add(w)
-    return frozenset(kws)
-
-
-def _context_keywords(num: str, text: str, window: int = 20) -> frozenset:
-    """Keywords from the context window surrounding the first occurrence of `num` in `text`."""
-    m = re.search(r"(?<![.\d])" + re.escape(num) + r"(?![.\d])", text)
-    if not m:
-        return frozenset()
-    ctx = text[max(0, m.start() - window) : m.start()] + text[m.end() : m.end() + window]
-    return _extract_keywords(ctx)
-
-
-def _atoms_context_keywords(num: str, atoms_raw: str, window: int = 30) -> frozenset:
-    """Union of keywords from ALL occurrences of `num` in atoms_raw."""
-    kws: set[str] = set()
-    for m in re.finditer(r"(?<![.\d])" + re.escape(num) + r"(?![.\d])", atoms_raw):
-        ctx = (
-            atoms_raw[max(0, m.start() - window) : m.start()]
-            + atoms_raw[m.end() : m.end() + window]
-        )
-        kws.update(_extract_keywords(ctx))
-    return frozenset(kws)
-
-
-def _validate_metric_sources(
-    bullets: List[ResumeBullet],
-    atoms_raw: Optional[str] = None,
-) -> List[ResumeBullet]:
-    """
-    Pass 2 validator — structural validation (three steps):
-
-    Step 1  Numbers in bullet_text must appear (exact set) in metric_source.
-            "2" does not pass when source only has "1.2".
-
-    Step 2  (requires atoms_raw) Numbers in metric_source must appear in atoms_raw.
-            Catches "91%" invented from "2.91%".
-
-    Step 3  (requires atoms_raw) Context anchor: keywords around each number in
-            metric_source must overlap with keywords around that same number in atoms.
-            Allows paraphrasing ("退货率比发布当月降低" ≈ "退货率降低") while blocking
-            context swaps ("报告生成时间" ≠ "核算耗时").
-
-    Paraphrasing is explicitly OK as long as Steps 1-3 pass.
-    """
-    atoms_nums = set(_NUM_PATTERN.findall(atoms_raw)) if atoms_raw else None
-
-    def _strip_all(text: str) -> str:
-        return re.sub(r"\d+\.?\d*" + _UNIT_SUFFIX, "[X]", text)
-
-    def _strip_num(text: str, num: str) -> str:
-        return re.sub(rf"(?<!\d){re.escape(num)}{_UNIT_SUFFIX}(?!\d)", "[X]", text)
-
-    def _flag(b: ResumeBullet, cleaned: str, prefix: str) -> ResumeBullet:
-        return ResumeBullet(
-            experience_name=b.experience_name,
-            bullet_text=cleaned,
-            claim_level="Red",
-            evidence=b.evidence,
-            interview_risk=prefix + b.interview_risk,
-            recommended_action="Verify metric source or remove number from bullet",
-            metric_source=b.metric_source,
-        )
-
-    validated = []
-    for b in bullets:
-        nums = _NUM_PATTERN.findall(b.bullet_text)
-
-        if not nums:
-            validated.append(b)
-            continue
-
-        # ── Pre-check: metric_source must be present when numbers exist ─────────
-        if not b.metric_source:
-            logger.debug("metric_source missing for bullet — flagging Red: %r", b.bullet_text[:80])
-            validated.append(_flag(b, _strip_all(b.bullet_text),
-                                   "[METRIC SOURCE MISSING — no attribution provided] "))
-            continue
-
-        # ── Step 1: numbers in bullet must appear in metric_source ───────────────
-        source_nums = set(_NUM_PATTERN.findall(b.metric_source))
-        bad = [n for n in nums if n not in source_nums]
-        if bad:
-            logger.debug("Step 1 fail — %s absent from metric_source: %r", bad, b.bullet_text[:80])
-            cleaned = b.bullet_text
-            for n in bad:
-                cleaned = _strip_num(cleaned, n)
-            validated.append(_flag(cleaned=cleaned, b=b,
-                                   prefix=f"[METRIC MISMATCH — {', '.join(bad)} not in metric_source] "))
-            continue
-
-        if atoms_raw is not None:
-            # ── Step 2: numbers in metric_source must appear in atoms ────────────
-            bad_src = [n for n in source_nums if n not in atoms_nums]
-            if bad_src:
-                logger.debug("Step 2 fail — %s not in atoms: %r", bad_src, b.metric_source[:80])
-                validated.append(_flag(b, _strip_all(b.bullet_text),
-                                       f"[METRIC NUMBER NOT IN ATOMS — "
-                                       f"{', '.join(bad_src)} absent from experience_atoms] "))
-                continue
-
-            # ── Step 3: context anchor ───────────────────────────────────────────
-            failed_num = None
-            for num in source_nums:
-                src_kws = _context_keywords(num, b.metric_source)
-                if not src_kws:
-                    continue  # no surrounding context to verify
-                atm_kws = _atoms_context_keywords(num, atoms_raw)
-                if not (src_kws & atm_kws):
-                    failed_num = num
-                    break
-
-            if failed_num is not None:
-                logger.debug("Step 3 fail — context mismatch for %s: %r",
-                             failed_num, b.metric_source[:80])
-                validated.append(_flag(b, _strip_all(b.bullet_text),
-                                       f"[CONTEXT MISMATCH — metric_source context for "
-                                       f"{failed_num} shares no keywords with atoms] "))
-                continue
-
-        validated.append(b)
-
-    return validated
-
-
 def generate_resume(
     selection: ExperienceSelectionResult,
     ideal: IdealCandidate,
@@ -276,11 +135,24 @@ def generate_resume(
     if metric_whitelist is not None:
         whitelist_block = "\n\n" + _build_whitelist_block(selection, metric_whitelist)
 
+    # Inject raw atoms for the selected experiences so the LLM can quote them accurately
+    atoms_block = ""
+    if atoms_raw is not None:
+        exp_ids = [exp.experience_id for exp in selection.included]
+        atoms_excerpt = _extract_atoms_for_experiences(atoms_raw, exp_ids)
+        if atoms_excerpt:
+            atoms_block = (
+                "\n\n=== ORIGINAL ATOMS (metric_source must quote exact phrases from below) ===\n"
+                + atoms_excerpt
+                + "\n=== END ATOMS ==="
+            )
+
     user = (
         f"Target role: {target_role}\nTarget company: {target_company}\n\n"
         "## Ideal Candidate\n" + ideal.model_dump_json(indent=2)
         + "\n\n## Selected Experiences\n" + selection.model_dump_json(indent=2)
         + whitelist_block
+        + atoms_block
     )
 
     def _fix_packing_notes(data: dict) -> dict:
@@ -300,8 +172,8 @@ def generate_resume(
             digit_wl = allowed_digits(metric_whitelist)
             bullets = _validate_bullets(bullets, name_to_id, digit_wl)
 
-        # Pass 2: verbatim source attribution check
-        bullets = _validate_metric_sources(bullets, atoms_raw)
+        # Pass 2: structural source attribution check
+        bullets = validate_metric_sources(bullets, atoms_raw)
 
         resume = TailoredResume(
             target_role=resume.target_role,

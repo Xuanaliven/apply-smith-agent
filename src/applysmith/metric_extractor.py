@@ -48,7 +48,9 @@ def _extract_tokens(text: str) -> List[str]:
 
     # Only match tokens that have a unit or suffix — bare standalone digits
     # (e.g. "1" from "第1步") are too ambiguous to be useful as metrics.
-    pattern = r"\d+(?:[%+]|[天月年周小时分秒条个万亿k]+\+?|\+)"
+    # Decimal part (?:\.\d+)? handles "2.91%", "4.5分", "31.7万条", "8.5s".
+    # Unit list includes "s" for seconds ("8s", "30s").
+    pattern = r"\d+(?:\.\d+)?(?:[%+]|[天月年周小时分秒条个万亿ks]+\+?|\+)"
     tokens = re.findall(pattern, cleaned)
 
     # Deduplicate while preserving order

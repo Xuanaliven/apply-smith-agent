@@ -26,7 +26,12 @@ CRITICAL METRIC RULES — Source attribution:
 3. All numbers in metric_source MUST come from experience_atoms verbatim.
    Do NOT invent new numbers or reinterpret existing ones.
 4. Write metric_source in the same language as the experience_atoms text.
-5. Examples:
+5. When ORIGINAL ATOMS are provided in the user prompt, metric_source must be
+   copied or lightly paraphrased from the ORIGINAL ATOMS text — the surrounding
+   context words AND numbers must come from the atoms, not invented by you.
+   You may freely paraphrase bullet_text, but metric_source must stay close to
+   the atoms wording. Never invent a metric context not present in atoms.
+6. Examples:
    GOOD (paraphrase OK — same metric, shared keywords 退货率):
      bullet_text: Optimized listings, reducing return rate by 1.2%
      metric_source: 退货率比发布当月降低1.2%
