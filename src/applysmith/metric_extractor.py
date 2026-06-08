@@ -46,11 +46,19 @@ def _extract_tokens(text: str) -> List[str]:
     # before extraction so they don't contribute false tokens.
     cleaned = re.sub(r"\b\d+-\d+\b", "", text)
 
-    # Only match tokens that have a unit or suffix — bare standalone digits
-    # (e.g. "1" from "第1步") are too ambiguous to be useful as metrics.
+    # Primary: numbers that have a unit or suffix.
     # Decimal part (?:\.\d+)? handles "2.91%", "4.5分", "31.7万条", "8.5s".
     # Unit list includes "s" for seconds ("8s", "30s").
-    pattern = r"\d+(?:\.\d+)?(?:[%+]|[天月年周小时分秒条个万亿ks]+\+?|\+)"
+    #
+    # Fallback: bare significant decimals (must have a decimal point).
+    # Catches dimensionless ratio metrics like "167.9" (net value per 1K coupons)
+    # that appear in metric fields without a recognised unit suffix.
+    # Bare *integers* are still excluded — too ambiguous (e.g. "3" from "3个品").
+    # Unit-bearing pattern is tried first; bare decimal only fires when it fails.
+    pattern = (
+        r"\d+(?:\.\d+)?(?:[%+]|[天月年周小时分秒条个万亿ks]+\+?|\+)"
+        r"|\d+\.\d+"
+    )
     tokens = re.findall(pattern, cleaned)
 
     # Deduplicate while preserving order

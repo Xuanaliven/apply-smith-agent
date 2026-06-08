@@ -294,6 +294,33 @@ def test_metric_whitelist_extraction():
     assert wl["EXP-004"] == [], f"Expected empty, got {wl['EXP-004']}"
 
 
+def test_bare_decimal_extracted_as_metric_token():
+    """Bare significant decimal (167.9) with no unit suffix is extracted from metric field."""
+    atoms = """\
+## EXP-004
+- experience_name: O2O补贴策略优化研究
+- metric: 高频领券用户对低折扣券核销率仅2.91%；优化后每千张券净价值较原有策略提升167.9；31.7万条样本验证
+"""
+    wl = extract_metrics(atoms)
+    tokens = wl["EXP-004"]
+    assert "2.91%" in tokens, f"Expected 2.91%, got {tokens}"
+    assert "167.9" in tokens, f"Expected 167.9, got {tokens}"
+    assert "31.7万条" in tokens, f"Expected 31.7万条, got {tokens}"
+
+
+def test_bare_integer_not_extracted_without_unit():
+    """Bare integer with no unit (e.g. '3' from '小类目前3') is NOT extracted."""
+    atoms = """\
+## EXP-002
+- experience_name: 电商运营
+- metric: 产品进入小类目前3；退货率降低1.2%
+"""
+    wl = extract_metrics(atoms)
+    tokens = wl["EXP-002"]
+    assert "3" not in tokens, f"Bare integer '3' should not be extracted, got {tokens}"
+    assert "1.2%" in tokens, f"Expected 1.2%, got {tokens}"
+
+
 # ---------------------------------------------------------------------------
 # 7. test_whitelist_enforced
 # ---------------------------------------------------------------------------
