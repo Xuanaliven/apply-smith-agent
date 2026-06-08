@@ -678,3 +678,101 @@ def test_paraphrase_with_shared_keywords_passes():
             atoms_raw=_ATOMS_RETURN_SHORT,
         )
     assert result.bullets[0].claim_level == "Green"
+
+
+# ---------------------------------------------------------------------------
+# 14. Chinese unit notation tests (31.7万, 万, etc.)
+# ---------------------------------------------------------------------------
+
+_ATOMS_CN_UNIT = """\
+## EXP-004
+- experience_name: O2O补贴策略优化研究
+- metric: 高频领券用户对低折扣券核销率仅2.91%；31.7万条样本验证
+"""
+
+_SELECTION_CN = ExperienceSelectionResult(
+    included=[ExperienceMatch(
+        experience_id="EXP-004",
+        experience_name="O2O补贴策略优化研究",
+        match_level="Strong",
+        why_matched="Coupon ops",
+        suggested_angle="",
+        risk_notes="",
+    )],
+    excluded=[], packaging_notes="", capability_gaps=[],
+)
+
+_IDEAL_CN = IdealCandidate(
+    role_type="Growth Ops",
+    background_summary="Data ops.",
+    must_have_experiences=[],
+    nice_to_have_experiences=[],
+    must_have_skills=[],
+    differentiators=[],
+    red_line_filters=[],
+)
+
+
+def test_cn_unit_notation_in_bullet_passes():
+    """Bullet using Chinese unit form '31.7万' should pass all validation steps.
+
+    When atoms say '31.7万条样本验证', the LLM should write '31.7万' in bullet_text
+    and metric_source — not convert to '317,000'. This test verifies that keeping
+    the original notation passes Pass 1 (whitelist) and Pass 2 (structural validator).
+    """
+    mock = {
+        "target_role": "Growth Ops",
+        "target_company": "TestCo",
+        "summary_statement": "Data ops.",
+        "bullets": [{
+            "experience_name": "O2O补贴策略优化研究",
+            "bullet_text": "Analyzed 31.7万 coupon records, finding high-frequency users had only a 2.91% low-value redemption rate.",
+            "claim_level": "Green",
+            "evidence": "31.7万条样本；核销率仅2.91%",
+            "interview_risk": "",
+            "recommended_action": "",
+            "metric_source": "31.7万条样本验证；高频领券用户对低折扣券核销率仅2.91%",
+        }],
+        "packaging_notes": "",
+    }
+    with patch("applysmith.llm_client.call_llm", return_value=json.dumps(mock)):
+        result = generate_resume(
+            _SELECTION_CN, _IDEAL_CN, "Growth Ops", "TestCo",
+            metric_whitelist={"EXP-004": ["2.91%", "31.7万条"]},
+            atoms_raw=_ATOMS_CN_UNIT,
+        )
+    assert result.bullets[0].claim_level == "Green", (
+        f"Expected Green, got {result.bullets[0].claim_level}: "
+        f"{result.bullets[0].interview_risk}"
+    )
+
+
+def test_cn_unit_converted_to_western_fails_pass1():
+    """Bullet converting '31.7万' → '317,000' should be stripped by Pass 1.
+
+    '317' is not in allowed_digits for whitelist token '31.7万条' (which yields
+    {'31', '7'}). The validator should strip it and flag Red.
+    """
+    mock = {
+        "target_role": "Growth Ops",
+        "target_company": "TestCo",
+        "summary_statement": "Data ops.",
+        "bullets": [{
+            "experience_name": "O2O补贴策略优化研究",
+            "bullet_text": "Analyzed 317,000 coupon records to identify subsidy sensitivity.",
+            "claim_level": "Green",
+            "evidence": "31.7万条",
+            "interview_risk": "",
+            "recommended_action": "",
+            "metric_source": "31.7万条样本验证",
+        }],
+        "packaging_notes": "",
+    }
+    with patch("applysmith.llm_client.call_llm", return_value=json.dumps(mock)):
+        result = generate_resume(
+            _SELECTION_CN, _IDEAL_CN, "Growth Ops", "TestCo",
+            metric_whitelist={"EXP-004": ["2.91%", "31.7万条"]},
+            atoms_raw=_ATOMS_CN_UNIT,
+        )
+    assert result.bullets[0].claim_level == "Red"
+    assert "FABRICATED" in result.bullets[0].interview_risk
